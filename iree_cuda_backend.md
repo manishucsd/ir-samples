@@ -48,7 +48,8 @@ scf.for %arg0 = %3 to %c3456 step %4 {
 **Key takeways from TileAndDistributeToWorkgroups:**
 - CTA level tiling and distribute to break into the computation into thread blocks of 128x128 on output C matrix.
 - These two `scf.for` loops are tiled using user provided tile size (`128x128`) and distributed accross SMs. 
-- Thus, reducing linalg.matmul too tiles of `128x128x2048`.
+- Thus, reducing linalg.matmul too tiles of `128x128x2048`. 
+- There is a TileK=64 and we will tile accross K dimension as well; however, TileK will not be distributed accrss SMs as split-k-slice=1.
 - Note that there is not split-k-slice used in this example, but split-k-slice is supported by IREE.
 
 ```mlir
@@ -110,7 +111,114 @@ Listing 3. Bufferization pass converts tensors to memref and create memref.subvi
 - Why tensor to memrefs?
 - memref.subview creates the view of intput operands A and B and output C for single tiled-iteration 128x128x64.
 
-TODO: FILL what is the usage of bufferization pass
+
+```mlir
+// -----// IR Dump After LLVMGPUTileAndDistribute (iree-llvmgpu-tile-and-distribute) //----- //
+func.func @_matmul_f16_f16_dispatch_0() {
+  ...
+  scf.for %arg0 = %6 to %c3456 step %7 { // CtaM tile
+    %8 = affine.apply affine_map<()[s0] -> (s0 * 128)>()[%workgroup_id_x]
+    %9 = affine.apply affine_map<()[s0] -> (s0 * 128)>()[%workgroup_count_x]
+    scf.for %arg1 = %8 to %c1024 step %9 { // CtaN tile
+      %10 = memref.subview %5[%arg0, %arg1] [128, 128] [1, 1] : memref<3456x1024xf16> to memref<128x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+      %11 = memref.subview %3[%arg0, 0] [128, 2048] [1, 1] : memref<3456x2048xf16> to memref<128x2048xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>>
+      %12 = memref.subview %4[0, %arg1] [2048, 128] [1, 1] : memref<2048x1024xf16> to memref<2048x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+      %13 = gpu.thread_id  x
+      %14 = gpu.thread_id  y
+      %15 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%14]
+      scf.for %arg2 = %15 to %c128 step %c128 { // 128x128 tile linalg.fill 
+        %16 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%13)
+        scf.for %arg3 = %16 to %c128 step %c128 {
+          %17 = memref.subview %2[%arg2, %arg3] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+          linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%cst : f16) outs(%17 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+        }
+      }
+      scf.for %arg2 = %c0 to %c2048 step %c64 { // mainloop gemm_k_iterations
+        %16 = memref.subview %11[0, %arg2] [128, 64] [1, 1] : memref<128x2048xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>>
+        %17 = memref.subview %12[%arg2, 0] [64, 128] [1, 1] : memref<2048x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+        gpu.barrier
+        memref.copy %16, %1 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, 3>
+        memref.copy %17, %0 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, 3>
+        gpu.barrier
+        %18 = gpu.thread_id  x
+        %19 = gpu.thread_id  y
+        %20 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%19]
+        scf.for %arg3 = %20 to %c128 step %c128 { // WarpTileM
+          %21 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%18)
+          scf.for %arg4 = %21 to %c128 step %c128 { // WarpTileN
+            %22 = memref.subview %1[%arg3, 0] [64, 64] [1, 1] : memref<128x64xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+            %23 = memref.subview %0[0, %arg4] [64, 64] [1, 1] : memref<64x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+            %24 = memref.subview %2[%arg3, %arg4] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+            linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%22, %23 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%24 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+          }
+        }
+      }
+      gpu.barrier
+      memref.copy %2, %10 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x128xf16, 3> to memref<128x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+      gpu.barrier
+    }
+  }
+```
+Listing 4. LLVMGPUTileAndDistribute tiles and distribute further to wraps. Notice the introduction of additional `scf.for` loops
+tiling and distribution accross warps.
 
 
+**Key takeaways from **
+- Tiles and distributes matmul across warps. See comment "WarpTileM" and "WarpTileN" in the Listing 4.
+- These `scf.for` loops are distributed and fully unrolled. These are not seen in the final ptx code.
 
+```mlir
+  // -----// IR Dump After RemoveSingleIterationLoop (iree-codegen-remove-single-iteration-loop) //----- //
+  %15 = memref.subview %2[%13, %14] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+  linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%cst : f16) outs(%15 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+  scf.for %arg0 = %c0 to %c2048 step %c64 {
+    %16 = memref.subview %9[0, %arg0] [128, 64] [1, 1] : memref<128x2048xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>>
+    %17 = memref.subview %10[%arg0, 0] [64, 128] [1, 1] : memref<2048x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+    gpu.barrier
+    memref.copy %16, %1 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, 3>
+    memref.copy %17, %0 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, 3>
+    gpu.barrier
+    %18 = gpu.thread_id  x
+    %19 = gpu.thread_id  y
+    %20 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%19]
+    %21 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%18)
+    %22 = memref.subview %1[%20, 0] [64, 64] [1, 1] : memref<128x64xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    %23 = memref.subview %0[0, %21] [64, 64] [1, 1] : memref<64x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    %24 = memref.subview %2[%20, %21] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%22, %23 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%24 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+  }
+```
+Listing 5.
+
+```mlir
+// -----// IR Dump After LLVMGPUMultiBuffering (iree-llvmgpu-multi-buffering) //----- //
+linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%cst : f16) outs(%15 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+  scf.for %arg0 = %c0 to %c2048 step %c64 {
+    %16 = affine.apply affine_map<(d0, d1, d2) -> (((d0 - d1) floordiv d2) mod 3)>(%arg0, %c0, %c64)
+    %17 = memref.subview %1[%16, 0, 0] [1, 128, 64] [1, 1, 1] : memref<3x128x64xf16, 3> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    %18 = affine.apply affine_map<(d0, d1, d2) -> (((d0 - d1) floordiv d2) mod 3)>(%arg0, %c0, %c64)
+    %19 = memref.subview %0[%18, 0, 0] [1, 64, 128] [1, 1, 1] : memref<3x64x128xf16, 3> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    %20 = memref.subview %9[0, %arg0] [128, 64] [1, 1] : memref<128x2048xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>>
+    %21 = memref.subview %10[%arg0, 0] [64, 128] [1, 1] : memref<2048x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>
+    gpu.barrier
+    memref.copy %20, %17 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    memref.copy %21, %19 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    gpu.barrier
+    %22 = gpu.thread_id  x
+    %23 = gpu.thread_id  y
+    %24 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%23]
+    %25 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%22)
+    %26 = memref.subview %17[%24, 0] [64, 64] [1, 1] : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    %27 = memref.subview %19[0, %25] [64, 64] [1, 1] : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    %28 = memref.subview %2[%24, %25] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%26, %27 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%28 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+  }
+```
+Listing 6. LLVMGPUMultiBuffering stages through shared memory. Notice the 3-dimentional Shared Memory shape `memref<3x128x64xf16, 3>`
+
+```
+// -----// IR Dump After GPUDistributeSharedMemoryCopy (iree-gpu-distribute-shared-memory-copy) //----- //
+// three vector.transfer_read, vector.contract, vector.transfer_write
+
+```
+TODO: Discuss with Thomas to find the main passes after this. 

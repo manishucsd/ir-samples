@@ -230,7 +230,8 @@ linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #ire
     linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%26, %27 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%28 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
   }
 ```
-Listing 6. LLVMGPUMultiBuffering stages through shared memory. Notice the 3-dimentional Shared Memory shape `memref<3x128x64xf16, 3>`
+Listing 6. LLVMGPUMultiBuffering stages through shared memory. Notice the 3-dimentional Shared Memory shape 
+`memref<3x128x64xf16, 3>`
 
 ```
 // -----// IR Dump After GPUDistributeSharedMemoryCopy (iree-gpu-distribute-shared-memory-copy) //----- //

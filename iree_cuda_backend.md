@@ -1,5 +1,6 @@
-**IREE CUDA Backend linalg.matmul as the input IR to PTX**
+# IREE CUDA Backend linalg.matmul as the input IR to PTX
 
+## Input Linalg Matmul
 ```mlir
 module {
  func.func @matmul_f16_f16() {
@@ -19,7 +20,7 @@ Listing 1. Specifically we are interested in lowering of linalg.matmul at line n
 Starting with high-level matmul description. The below IR only specifies the gemm problem size (3456x1024x2048), input datatype,
 output datatype, and accumulation datatype.
 
-
+## Tile and Distribute to CTAs
 ```mlir
 // -----// IR Dump After TileAndDistributeToWorkgroups (iree-codegen-tile-and-distribute-to-workgroups) //----- //
 …
@@ -56,6 +57,7 @@ scf.for %arg0 = %3 to %c3456 step %4 {
 %11 = linalg.matmul {lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%7, %8 : tensor<128x2048xf16>, tensor<2048x128xf16>) outs(%10 : tensor<128x128xf16>) -> tensor<128x128xf16>
 ```
 
+## Bufferize (tensors -> memref)
 ```mlir
 // -----// IR Dump After IREEComprehensiveBufferize (iree-codegen-iree-comprehensive-bufferize) //----- //
 module {
@@ -111,7 +113,7 @@ Listing 3. Bufferization pass converts tensors to memref and create memref.subvi
 - Why tensor to memrefs?
 - memref.subview creates the view of intput operands A and B and output C for single tiled-iteration 128x128x64.
 
-
+## Tile and Distribute to Warps
 ```mlir
 // -----// IR Dump After LLVMGPUTileAndDistribute (iree-llvmgpu-tile-and-distribute) //----- //
 func.func @_matmul_f16_f16_dispatch_0() {
@@ -126,9 +128,9 @@ func.func @_matmul_f16_f16_dispatch_0() {
       %13 = gpu.thread_id  x
       %14 = gpu.thread_id  y
       %15 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%14]
-      scf.for %arg2 = %15 to %c128 step %c128 { // 128x128 tile linalg.fill 
+      scf.for %arg2 = %15 to %c128 step %c128 { // 128x128 tile linalg.fill in m-dim
         %16 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%13)
-        scf.for %arg3 = %16 to %c128 step %c128 {
+        scf.for %arg3 = %16 to %c128 step %c128 { // 128x128 tile linalg.fill in n-dim
           %17 = memref.subview %2[%arg2, %arg3] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
           linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%cst : f16) outs(%17 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
         }
@@ -143,9 +145,9 @@ func.func @_matmul_f16_f16_dispatch_0() {
         %18 = gpu.thread_id  x
         %19 = gpu.thread_id  y
         %20 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%19]
-        scf.for %arg3 = %20 to %c128 step %c128 { // WarpTileM
+        scf.for %arg3 = %20 to %c128 step %c128 { // TileAndDistributed over WarpTileM 
           %21 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%18)
-          scf.for %arg4 = %21 to %c128 step %c128 { // WarpTileN
+          scf.for %arg4 = %21 to %c128 step %c128 { // TileAndDistributed over WarpTileN
             %22 = memref.subview %1[%arg3, 0] [64, 64] [1, 1] : memref<128x64xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
             %23 = memref.subview %0[0, %arg4] [64, 64] [1, 1] : memref<64x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
             %24 = memref.subview %2[%arg3, %arg4] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
@@ -166,7 +168,20 @@ tiling and distribution accross warps.
 **Key takeaways from **
 - Tiles and distributes matmul across warps. See comment "WarpTileM" and "WarpTileN" in the Listing 4.
 - These `scf.for` loops are distributed and fully unrolled. These are not seen in the final ptx code.
+- Ignorning the `scf.for` on `linalg.fill`, there are 5 `scf.for` loops, 2 distributed/prallelized across CTAs and
+two across warps. 
+- There is only one `scf.for` loop on the GEMM-K dimension which will be in the IR after the next pass. 
+- Notice two `memref.copy` for operandA and operandB that moves the data from global to shared memory.
+```mlir
+memref.copy %16, %1 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, 3>
+memref.copy %17, %0 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, 3>
+```
 
+- `linalg.matmul` is now over a warp tile of 64x64x64, i.e., 2 warps in CtaM and 2 warps in CtaN dimension.
+```mlir
+linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%22, %23 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%24 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
+```
+## Remove Distributed (Parallel) `scf.for` Loops over CTAs and Warps within a CTA
 ```mlir
   // -----// IR Dump After RemoveSingleIterationLoop (iree-codegen-remove-single-iteration-loop) //----- //
   %15 = memref.subview %2[%13, %14] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
@@ -188,8 +203,9 @@ tiling and distribution accross warps.
     linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%22, %23 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%24 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)
   }
 ```
-Listing 5.
+Listing 5. RemoveSingleIterationLoop keeps only one `scf.for` loop over GEMM-K problem.
 
+## Mutistage Pipelining 
 ```mlir
 // -----// IR Dump After LLVMGPUMultiBuffering (iree-llvmgpu-multi-buffering) //----- //
 linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%cst : f16) outs(%15 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>)

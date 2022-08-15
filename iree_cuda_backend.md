@@ -233,9 +233,112 @@ linalg.fill {__internal_linalg_transform__ = "vectorize", lowering_config = #ire
 Listing 6. LLVMGPUMultiBuffering stages through shared memory. Notice the 3-dimentional Shared Memory shape 
 `memref<3x128x64xf16, 3>`
 
+## MemrefCopyToLinalgPass
+
+`MemrefCopyToLinalgPass` takes the mlir snippet below 
+```mlir
+    gpu.barrier
+    memref.copy %20, %17 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>> to memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    memref.copy %21, %19 {__internal_linalg_transform__ = "copy_to_workgroup_memory"} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>> to memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    gpu.barrier
 ```
+
+to
+
+```mlir
+    gpu.barrier
+    linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = ["parallel", "parallel"]} ins(%20 : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 2048 + s0 + d1)>>) outs(%17 : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>) attrs =  {__internal_linalg_transform__ = "copy_to_workgroup_memory"} {
+    ^bb0(%arg1: f16, %arg2: f16):
+      linalg.yield %arg1 : f16
+    }
+    linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = ["parallel", "parallel"]} ins(%21 : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>) outs(%19 : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) attrs =  {__internal_linalg_transform__ = "copy_to_workgroup_memory"} {
+    ^bb0(%arg1: f16, %arg2: f16):
+      linalg.yield %arg1 : f16
+    }
+    gpu.barrier
+```
+Listing 7.
+
+
+## GPUDistributeSharedMemoryCopy
+`GPUDistributeSharedMemoryCopy` takes linalg.generic copy on memeref to vectors distributing the copies over threads. 
+Each thread issues vector.transfer_read from Global memory and vector.transfer_write to Global memory.
+
+memref (GMEM) ----vector.transfer_read--> vector (Registers) ---vector.transfer_write--> memref (SMEM)
+
+For SM80 cp.async vector registers will optimized out as cp.async can issue direct copy from GMEM to SMEM.
+
+```mlir
 // -----// IR Dump After GPUDistributeSharedMemoryCopy (iree-gpu-distribute-shared-memory-copy) //----- //
-// three vector.transfer_read, vector.contract, vector.transfer_write
+    %159 = vector.transfer_read %104[%157, %158], %cst {in_bounds = [true, true]} : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 1024 + s0 + d1)>>, vector<1x8xf16>
+    ...
+    vector.transfer_write %147, %102[%169, %170] {in_bounds = [true, true]} : vector<1x8xf16>, memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    gpu.barrier
+    %185 = gpu.thread_id  x
+    %186 = gpu.thread_id  y
+    %187 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%186]
+    %188 = affine.apply affine_map<(d0) -> ((d0 floordiv 32) * 64)>(%185)
+    %189 = memref.subview %100[%187, 0] [64, 64] [1, 1] : memref<128x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>
+    %190 = memref.subview %102[0, %188] [64, 64] [1, 1] : memref<64x128xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    %191 = memref.subview %5[%187, %188] [64, 64] [1, 1] : memref<128x128xf16, 3> to memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>
+    linalg.matmul {__internal_linalg_transform__ = "vectorize", lowering_config = #iree_codegen.lowering_config<tile_sizes = [[128, 128, 64]]>} ins(%189, %190 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 64 + s0 + d1)>, 3>, memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) outs(%191 : memref<64x64xf16, affine_map<(d0, d1)[s0] -> (d0 * 128 + s0 + d1)>, 3>) 
+```
+Listing 8. Part of the mainloop after `GPUDistributeSharedMemoryCopy` linalg.matmul above is warp-level matmul.
+
+After the mainloop, there are vector.transfer_read and vector.transfer_write (WHAT ARE THOSE FOR?)
+
+```mlir
+gpu.barrier
+ %17 = affine.apply affine_map<()[s0, s1, s2] -> (s1 * 4 + s2 * 8 + s0 floordiv 16)>()[%0, %1, %2]
+ %18 = affine.apply affine_map<()[s0] -> (s0 * 8 - (s0 floordiv 16) * 128)>()[%0]
+ %19 = vector.transfer_read %5[%17, %18], %cst {in_bounds = [true, true]} : memref<128x128xf16, 3>, vector<1x8xf16>
+ %20 = affine.apply affine_map<()[s0, s1, s2] -> (s1 * 4 + s2 * 8 + s0 floordiv 16 + 8)>()[%0, %1, %2]
+    
+ ```
+
+## LLVMGPUReduceBankConflicts
+`LLVMGPUReduceBankConflicts` only does padding and nother related to Shared Memory swizzle. 
+
+## WorkGroupSwizzle
+Threadblock swizzle and L2 reuse.
+
+
+## LLVMGPUTensorCoreVectorization
+`LLVMGPUTensorCoreVectorization` vectorizes `linalg.matmul`. It takes `linalg.matmul` to `vector.contract`.
+
+```mlir
+    %254 = vector.contract {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d2, d1)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %126, %158, %222 : vector<16x8xf16>, vector<8x8xf16> into vector<16x8xf16>
+```
 
 ```
-TODO: Discuss with Thomas to find the main passes after this. 
+mainloop:
+...
+  vector.transfer_reads
+  vector.transfer_reads
+  vector.contract
+  vector.transfer_write // WHY ARE WE WRITING BACK ACCUMULATORS TO SHARED MEMORY inside the MAINLOOP?
+```
+
+## OptimizeVectorTransfer
+`OptimizeVectorTransfer` does the following:
+- Hoist vector.transfer_read on C/Accumulators above the mainloop.
+- Hoist vector.transfer_write on C/Accumulators below the mainloop.
+- Christopher Bates is having issues and discussion points on hoisting theses and the application of bufferization pass.
+
+
+## FoldSubViewOps
+`FoldSubViewOps` removes subview and folds the arithmetic into the user of the instruction.
+
+## LLVMGPUVectorToGPU
+`LLVMGPUVectorToGPU` can be considered as `LLVMGPUVectorToGPU[NVGPU]`. We haven't yet added NVGPU to the pass name yet.
+NVGPU dialect starts here and we are transforming from `vector` to `nvgpu` dialect.
+
+```mlir
+%479 = nvgpu.ldmatrix %4[%475, %477, %478] {numTiles = 2 : i32, transpose = false} : memref<3x128x72xf16, 3> -> vector<2x2xf16>
+%824 = nvgpu.mma.sync(%472, %822, %arg33) {mmaShape = [16, 8, 8]} : (vector<2x2xf16>, vector<1x2xf16>, vector<2x2xf16>) -> vector<2x2xf16>
+```
+
+## GPUPipelining
+`GPUPipelining` applies software pipelining.
+- Software pipelining is applied here in GPUPipelining pass.
+- The 

@@ -341,4 +341,13 @@ NVGPU dialect starts here and we are transforming from `vector` to `nvgpu` diale
 ## GPUPipelining
 `GPUPipelining` applies software pipelining.
 - Software pipelining is applied here in GPUPipelining pass.
-- The 
+- The `LLVMGPUMultiBuffering` only creates multiple stages of Shared Memory, but doesn't interleave ldsm, mma.sync, and cp.sync.
+- `GPUPipelining` interleaves the instructions and creates optimal instructions schedule for the mainloop. 
+
+
+## LLVMGPUVectorLowering
+Preparing the lowering form `nvgpu` to `nnvm`
+
+
+
+

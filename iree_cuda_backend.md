@@ -110,8 +110,9 @@ module {
 Listing 3. Bufferization pass converts tensors to memref and create memref.subviews.
 
 **Key takeways from IREEComprehensiveBufferize:**
-- Why tensor to memrefs?
-- memref.subview creates the view of intput operands A and B and output C for single tiled-iteration 128x128x64.
+- tensors vs. memref
+   - tensors are immutable while memrefs are mutable memory allocations
+   - memref.subview creates the view of intput operands A and B and output C for single tiled-iteration 128x128x64.
 
 ## Tile and Distribute to Warps
 ```mlir

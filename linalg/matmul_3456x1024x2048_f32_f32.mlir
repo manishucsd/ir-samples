@@ -1,4 +1,6 @@
-// MxNxK = 3456x1024x2048
+// Problem size      : 3456x1024x2048
+// Input type        : F32
+// Accumulation type : F32
 func.func @matmul_f32_f32() {
   %lhs = util.unfoldable_constant dense<1.0> : tensor<3456x2048xf32>
   %rhs = util.unfoldable_constant dense<0.4> : tensor<2048x1024xf32>

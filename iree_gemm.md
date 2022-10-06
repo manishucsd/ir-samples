@@ -15,7 +15,7 @@ matrixB: K(32) rows x N(64) cols
 matrixC: M(42) rows x N(64) cols 
 ```
 
-## Now consider the following example
+Now consider the following example:
 ```mlir
 #map0 = affine_map<(d0, d1) -> (d1, d0)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
@@ -48,3 +48,11 @@ slice to match the vector shape of <8x16xf16>. Thus, vector is read into a colum
 vector of shape 8x16. The dimension with extent of 16 for matrixB is the fastest/contiguous
 dimenstion in the hardware vector registers for vector.contract to be succussfuly lowered to
 nvgpu.mma.sync (16816.f16.f16).
+
+# Vector to NVGPU
+Lowering from vector to nvgpu dilaect, where vectors are at warp-level sizes and nvgpu is at thread-level onwership and of the warp-level 
+operations.
+
+```mlir
+
+```

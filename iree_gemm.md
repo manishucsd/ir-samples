@@ -1,4 +1,4 @@
-## IREE GEMM Memory Layouts
+# Understanding IREE GEMM Memory Layouts
 IREE GEMMs are always row-row-row or TT cuBLAS/CUTLASS GEMM with row-major (T) output. 
 
 ```bash
@@ -36,8 +36,9 @@ func.func @m16n8k16_fp16_row_row_row(%arg0: memref<42x32xf16, 3>, %arg1: memref<
   return
 }
 ```
+![ALT](/media/gemm-row-row-row-42x64x32.png "Example row-row-row GEMM")
 
-# Fusing transpose with vector.transfer_read
+## Fusing transpose with vector.transfer_read
 ```mlir
 %B = vector.transfer_read %arg1[%c3, %c3], %cst {permutation_map = #map0, in_bounds = [true, true]} : memref<32x64xf16, 3>, vector<8x16xf16>
 ```

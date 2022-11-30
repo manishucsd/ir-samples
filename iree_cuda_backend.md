@@ -354,4 +354,19 @@ Preparing the lowering form `nvgpu` to `nnvm`
 - Compiler CodeGeneration Verification `iree/compiler/src/iree/compiler/Codegen/LLVMGPU/Verifiers.cpp`
 - NVGPU Verifiers ``
 
+## Unrolling warp-shped vector.contract op To mma.sync-shaped vector contract
 
+```cpp
+void mlir::vector::populateVectorUnrollPatterns(
+    RewritePatternSet &patterns, const UnrollVectorOptions &options,
+    PatternBenefit benefit) {
+  patterns.add<UnrollTransferReadPattern, UnrollTransferWritePattern,
+               UnrollContractionPattern, UnrollElementwisePattern,
+               UnrollReductionPattern, UnrollMultiReductionPattern,
+               UnrollTranposePattern>(patterns.getContext(), options, benefit);
+}
+```
+
+- All unroll patterns are independent of each other and can be applied in any order.
+- The IR is kept in functionally correct form for any order the unroll pattern gets applied. 
+- `vector.extract_slice` and `vector.insert_slice` are used to keep the IR functionally equivalent between different unroll patterns. 

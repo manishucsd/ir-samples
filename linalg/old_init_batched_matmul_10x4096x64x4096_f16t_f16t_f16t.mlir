@@ -19,7 +19,7 @@ func.func @batched_matmul_10x4096x64x4096_f16_f16(
     %A : tensor<10x4096x4096xf16>,
     %B : tensor<10x4096x64xf16>) -> tensor<10x4096x64xf16> {
     %c0 = arith.constant 0.0 : f16
-    %init = tensor.empty() : tensor<10x4096x64xf16>
+    %init = linalg.init_tensor[10, 4096, 64] : tensor<10x4096x64xf16>
     %C = linalg.fill ins(%c0 : f16) outs(%init : tensor<10x4096x64xf16>) -> tensor<10x4096x64xf16>
     %D = linalg.batch_matmul {compilation_info = #compilation_trait_mma_sync} 
             ins(%A, %B : tensor<10x4096x4096xf16>, tensor<10x4096x64xf16>) 

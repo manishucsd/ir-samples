@@ -11,7 +11,7 @@
   workgroup_size = [64 : index, 2 : index, 1 : index]
 >
 
-func.func @matmul_3456x1024x2048_f16_f16() {
+func.func @matmul_3456x1024x2048_f16t_f16t_f16t() {
   %lhs = util.unfoldable_constant dense<1.00> : tensor<3456x2048xf16>
   %rhs = util.unfoldable_constant dense<0.01> : tensor<2048x1024xf16>
   %c0 = arith.constant 0.0 : f16

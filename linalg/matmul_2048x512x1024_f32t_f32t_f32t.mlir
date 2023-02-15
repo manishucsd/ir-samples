@@ -1,4 +1,4 @@
-func.func @matmul_f32_f32() {
+func.func @matmul_2048x512x1024_f32t_f32t_f32t() {
   %lhs = util.unfoldable_constant dense<1.0> : tensor<2048x1024xf32>
   %rhs = util.unfoldable_constant dense<0.4> : tensor<1024x512xf32>
   %c0 = arith.constant 0.0 : f32

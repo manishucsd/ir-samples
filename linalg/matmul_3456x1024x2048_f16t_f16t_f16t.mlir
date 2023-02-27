@@ -5,7 +5,7 @@
 // matrixC           : F16, RowMajor
 
 #compilation_trait = #iree_codegen.compilation_info<
-  lowering_config = <tile_sizes = [[128, 128, 32]]>,
+  lowering_config = <tile_sizes = [[128, 128, 64]]>,
   translation_info = <LLVMGPUMatmulTensorCore
   pipeline_depth = 4>,
   workgroup_size = [64 : index, 2 : index, 1 : index]

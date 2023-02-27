@@ -1,3 +1,5 @@
+// old iree-benchmark-module commandline: ./tools/iree-benchmark-module --module_file=mma_sync_old_init_matmul_3456x1024x2048_f16t_f16t_f16t.vmfb --device=cuda --batch_size=100 --entry_function=matmul_3456x1024x2048_f16t_f16t_f16t --benchmark_repetitions=5
+
 // Problem size      : 3456x1024x2048
 // matrixA           : F16, RowMajor
 // matrixB           : F16, RowMajor
@@ -5,7 +7,7 @@
 // matrixC           : F16, RowMajor
 
 #compilation_trait = #iree_codegen.compilation_info<
-  lowering_config = <tile_sizes = [[128, 128, 32]]>,
+  lowering_config = <tile_sizes = [[128, 128, 64]]>,
   translation_info = <LLVMGPUMatmulTensorCore
   pipeline_depth = 4>,
   workgroup_size = [64 : index, 2 : index, 1 : index]

@@ -4,19 +4,24 @@
 // Accumulation type : F32
 // matrixC           : F32, RowMajor
 
-#compilation_trait = #iree_codegen.compilation_info<
-  lowering_config = <tile_sizes = [[1, 128, 128, 16]]>,
-  translation_info = <LLVMGPUMatmulTensorCore
-  pipeline_depth = 4>,
-  workgroup_size = [64 : index, 2 : index, 1 : index]>
+// Finename: ./generated/linalg/matmul/matmul_3456x1024x2048_f32t_f32t_f32t/matmul_3456x1024x2048_f32t_f32t_f32t.mlir
+// matmul compilation info (tile configuration, translation info, workgroup size)
+#tile_config_128x128_16x5_tensorcore_mma_sync = #iree_codegen.compilation_info<
+  lowering_config = <tile_sizes = [[128, 128, 16]]>,
+  translation_info = <LLVMGPUMatmulTensorCoreMmaSync pipeline_depth = 5>,
+  workgroup_size = [64 : index, 2 : index, 1 : index]
+>
 
-func.func @matmul_3456x1024x2048_f32t_f32t_f32t() {
-  %lhs = util.unfoldable_constant dense<1.0> : tensor<3456x2048xf32>
-  %rhs = util.unfoldable_constant dense<0.4> : tensor<2048x1024xf32>
+// Dispatch linalg.matmul row-row layout 
+func.func @matmul_3456x1024x2048_f32t_f32t_f32t_tile_config_128x128_16x5_tensorcore_mma_sync(
+  %lhs: tensor<3456x2048xf32>,
+  %rhs: tensor<2048x1024xf32>) -> tensor<3456x1024xf32>
+{
   %c0 = arith.constant 0.0 : f32
   %init = tensor.empty() : tensor<3456x1024xf32>
-  %CC = linalg.fill ins(%c0 : f32) outs(%init : tensor<3456x1024xf32>) -> tensor<3456x1024xf32>
-  %D = linalg.matmul {compilation_info = #compilation_trait} ins(%lhs, %rhs: tensor<3456x2048xf32>, tensor<2048x1024xf32>) outs(%CC: tensor<3456x1024xf32>) -> tensor<3456x1024xf32>
-  check.expect_almost_eq_const(%D, dense<819.000> : tensor<3456x1024xf32>) : tensor<3456x1024xf32>
-  return
+  %inital_result = linalg.fill ins(%c0 : f32) outs(%init : tensor<3456x1024xf32>) -> tensor<3456x1024xf32>
+  %result = linalg.matmul {compilation_info = #tile_config_128x128_16x5_tensorcore_mma_sync} 
+                     ins(%lhs, %rhs: tensor<3456x2048xf32>, tensor<2048x1024xf32>)
+                     outs(%inital_result: tensor<3456x1024xf32>) -> tensor<3456x1024xf32>
+  return %result : tensor<3456x1024xf32>
 }

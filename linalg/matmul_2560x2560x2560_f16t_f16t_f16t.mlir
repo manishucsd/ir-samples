@@ -12,7 +12,7 @@
 >
 
 
-func.func @matmul() -> tensor<2560x2560xf16> {
+func.func @matmul_2560x2560x2560_f16t_f16t_f16t() -> tensor<2560x2560xf16> {
   %lhs = util.unfoldable_constant dense<1.0> : tensor<2560x2560xf16>
   %rhs = util.unfoldable_constant dense<0.4> : tensor<2560x2560xf16>
   %c0 = arith.constant 0.0 : f16

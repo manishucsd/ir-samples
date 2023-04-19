@@ -10,7 +10,7 @@
 >
 
 // Dispatch linalg.matmul row-row layout 
-func.func @matmul_128x128x12288_f16t_f16t_f16t_tile_config_64x64_64x5_tensorcore_mmasync(
+func.func @split_k_matmul_128x128x12288_f16t_f16t_f16t_tile_config_64x64_64x5_tensorcore_mmasync(
   %lhs: tensor<128x12288xf16>,
   %rhs: tensor<12288x128xf16>) -> tensor<128x128xf16>
 {
